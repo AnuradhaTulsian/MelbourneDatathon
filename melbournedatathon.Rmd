@@ -1,0 +1,350 @@
+---
+title: "Can electricity consumption tell us anything about the pandemic?"
+author: "Anuradha Tulsian"
+date: "17/10/2020"
+output: pdf_document
+---
+
+Index
+1. Data Scrapping - you can skip this section and go straight to section 2
+2. Understanding Data   
+3. Building an ETS Model   
+4. Building an ARIMA Model 
+5. Building Linear Regression   
+6. Introducing Temperature Data  
+7. Linear Regression - Temp, Trend and Season   
+8. Linear Regression - Temp   
+9. Introducing dummy variable - Lockdown Parameter   
+10. Dynamic Regression   
+11. Conclusion  
+
+```{r loading libraries}
+library(fpp3)
+```
+\section {Data Scrapping}
+
+You do not need to run the code in this section and can go straight to Section 2. This is just to show how the data was fetched. 
+```{r Scrapping Data from AEMO}
+#Source - https://zenodo.org/record/851555 
+
+#Use this to set working directory or set it manually in R studio (which is what I have done)
+#path <- '/folder'
+#setwd(path)
+
+auto_install <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, 'Package'])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE, repos = 'http://cran.us.r-project.org')
+  sapply(pkg, require, character.only = TRUE)
+}
+
+packages <- c('stringr', 'R.utils')
+auto_install(packages)
+
+#Set up for loop
+state <- c('VIC1')
+year <- 2015:2020
+mon <- 1:12
+mon <- stringr::str_pad(mon, 2, pad = "0")
+
+# Run Loop for all state, for years and for month
+for(i in year){
+  for(j in mon){
+    for(k in state){
+      tryCatch({
+
+      download.file(paste('https://www.aemo.com.au/aemo/data/nem/priceanddemand/PRICE_AND_DEMAND_',i, j, '_',k, '.csv', sep=''),
+                    destfile = paste("PRICE_AND_DEMAND_", i, j, '_', k, '.csv', sep=""), mode="wb")
+
+      }, error=function(e){})
+
+    }
+  }
+}
+```
+
+```{r Combining the downloaded files}
+# Get the files names
+files = list.files(pattern="*.csv")
+# First apply read.csv, then rbind
+# myfiles = do.call(rbind, lapply(files, function(x) read.csv(x, stringsAsFactors = FALSE)))
+# 
+# write.csv(myfiles, "complete.csv")
+```
+
+\cection{Understanding Data}
+```{r Reading in the data}
+df <- read.csv("complete.csv")
+```
+
+```{r Tsibble}
+df_monthly <- df %>%   
+  mutate(date = as_date(SETTLEMENTDATE)) %>% 
+  mutate(month = yearmonth(date)) %>% 
+  select(-c(date, SETTLEMENTDATE, REGION, PERIODTYPE)) %>% 
+  group_by(month) %>%  
+  summarise(TotalDemand = sum(TOTALDEMAND), TotalRRP = sum(RRP)) %>%
+  as_tsibble(index = month)
+```
+
+```{r Removing October}
+df_monthly <- df_monthly[-c(70),]
+```
+
+```{r Inspecting Data}
+df_monthly %>% gg_season() +
+  xlab("Year") + ylab("Electricity Consumption") +
+  ggtitle("Seasonal Plot of Electricity Consumption in Victoria")
+
+df_monthly %>% gg_subseries() +
+  xlab("Year") + ylab("Electricity Consumption") +
+  ggtitle("Subseries Plot of Electricity Consumption in Victoria")
+```
+No significant changes in the months recorded in 2020.
+
+To understand if we can predict 2020 electricity consumption, I am going to use the following models: ETS, ARIMA, Linear Regression and Dynamic Regression. 
+
+```{r Train and Test}
+train <- df_monthly %>% slice(1: 62)
+test <- df_monthly %>% slice(63: 69)
+```
+
+\section{Building an ETS MODEL}
+
+```{r ETS}
+fit1 <- train %>% model(ETS(TotalDemand))
+
+fc1 <- fit1 %>% forecast(h = 6) 
+
+fit1 %>% report()
+```
+
+```{r ETS Accuracy}
+accuracy(fc1, test)
+```
+
+```{r ETS Residuals}
+fit1 %>% gg_tsresiduals()
+```
+
+```{r ETS Forecast}
+fc1 %>% autoplot(df_monthly) +
+  xlab("Year") + ylab("Electricity Consumption") +
+  ggtitle("Forecast for Electricity Consumption in Victoria using ETS")
+```
+\section{Building an ARIMA Model}
+
+```{r ARIMA}
+fit2 <- train %>% model(ARIMA(TotalDemand))
+
+fc2 <- fit2 %>% forecast(h = 6) 
+
+fit2 %>% report()
+```
+
+```{r ARIMA Accuracy}
+accuracy(fc2, test)
+```
+
+```{r ARIMA Residuals}
+fit2 %>% gg_tsresiduals()
+```
+
+```{r ARIMA Forecast}
+fc2 %>% autoplot(df_monthly) +
+  xlab("Year") + ylab("Electricity Consumption") +
+  ggtitle("Forecast for Electricity Consumption in Victoria using ARIMA")
+```
+
+\section{Building Linear Regression}
+```{r Linear Regression trend + season}
+fit3 <- train %>% model(TSLM(TotalDemand ~ trend() + season()))
+
+fc3 <- fit3 %>% forecast(h = 6) 
+
+fit3 %>% report()
+```
+
+```{r Linear Regression trend + season Accuracy}
+accuracy(fc3, test)
+```
+
+```{r Linear Regression trend + season Residuals}
+fit3 %>% gg_tsresiduals()
+```
+
+```{r Linear Regression trend + season Forecast}
+fc3 %>% autoplot(df_monthly) +
+  xlab("Year") + ylab("Electricity Consumption") +
+  ggtitle("Forecast for Electricity Consumption in Victoria using Linear Regression")
+```
+All these models look pretty similar in terms of the forecasts but ARIMA has the lowest model accuracy. 
+
+For the next part of this study, temperature data has been added to check and improve model accuracy. 
+
+\Section{Introducing Temperature Data} 
+
+This csv file was downloaded into the system directly using the link provided below. 
+SOURCE - http://www.bom.gov.au/jsp/ncc/cdio/weatherData/av?p_nccObsCode=36&p_display_type=dataFile&p_startYear=&p_c=&p_stn_num=086338
+
+```{r Reading in temp data}
+temp_df <- read.csv("IDCJAC0002_086338_Data1.csv")
+```
+
+```{r Manipulating dates}
+temp_df$Date <- paste(temp_df$Year, temp_df$Month, 01, sep="-")
+```
+
+
+```{r Creating tsibble}
+temp_df <- temp_df %>% 
+  mutate(Date = as_date(Date)) %>% 
+  mutate(month = yearmonth(Date)) %>% 
+  mutate(MeanTemp = Mean.maximum.temperature....C.) %>% 
+  select(-c(Date, Quality, Year, Month, Product.code, Bureau.of.Meteorology.station.number, Mean.maximum.temperature....C.)) %>% 
+  filter(year(month) >= 2015) %>% 
+  as_tsibble(index = month)
+```
+ 
+```{r Merging with electricity data}
+df_monthly_new <- merge(df_monthly, temp_df, by = "month")
+
+df_monthly_new <- df_monthly_new %>% as_tsibble(index = month)
+```
+
+```{r Train and test}
+train1 <- df_monthly_new %>% slice(1: 62)
+test1 <- df_monthly_new %>% slice(63: 69)
+```
+
+\section{Linear Regression - Temp, Trend and Season}
+
+This model uses three factors - Temperature, trend and season
+
+```{r Linear Regression + Temp}
+fit4 <- train1 %>% model(TSLM(TotalDemand ~ MeanTemp + trend() + season()))
+
+fc4 <- forecast(fit4, test1) 
+
+fit4 %>% report()
+```
+
+```{r Linear Regression + Temp Accuracy}
+accuracy(fc4, test1)
+```
+
+```{r Linear Regression + Temp Residuals}
+fit4 %>% gg_tsresiduals()
+```
+
+```{r Linear Regression + Temp Forecast}
+fc4 %>% autoplot(df_monthly_new) +
+  xlab("Year") + ylab("Electricity Consumption") +
+  ggtitle("Forecast for Electricity Consumption in Victoria using Linear Regression")
+```
+
+\section{Linear Regression - Temp}
+
+This model uses only one predictor - Mean Tempurature 
+```{r Linear Regression}
+fit5 <- train1 %>% model(TSLM(TotalDemand ~ MeanTemp))
+
+fc5 <- forecast(fit5, test1) 
+
+fit5 %>% report()
+```
+
+```{r Linear Regression Accuracy}
+accuracy(fc5, test1)
+```
+
+```{r Linear Regression Residuals}
+fit5 %>% gg_tsresiduals()
+```
+
+```{r Linear Regression Forecast}
+fc5 %>% autoplot(df_monthly_new) +
+  xlab("Year") + ylab("Electricity Consumption") +
+  ggtitle("Forecast for Electricity Consumption in Victoria using Linear Regression")
+```
+The linear model with temperature, trend and season does better. The linear model with only temperature as a parameter is unable to catch either of the peaks and is in the middle of the actual values. 
+
+\section{Introducing dummy variable for Lockdown}
+
+In this section, an additional parameter has been introduced, the Lockdown Parameter. Using this parameter, a distinction will be made between the months we were in lockdown as compared to others. This has been done to factor in any anamolity in the data that may have been difficult to catch through just visual inspection. 
+
+```{r dummy variable}
+df_monthly_dummy <- df_monthly_new %>% mutate(LockdownParameter = 0)
+
+df_monthly_dummy$LockdownParameter[63] <- 1
+df_monthly_dummy$LockdownParameter[64] <- 1
+df_monthly_dummy$LockdownParameter[65] <- 1
+df_monthly_dummy$LockdownParameter[67] <- 1
+df_monthly_dummy$LockdownParameter[68] <- 1
+df_monthly_dummy$LockdownParameter[69] <- 1
+```
+
+```{r train and test}
+train2 <- df_monthly_dummy %>% slice(1: 62)
+test2 <- df_monthly_dummy %>% slice(63: 69)
+```
+
+```{r Linear Regression + mean temp + dummy variable}
+fit6 <- train2 %>% model(TSLM(TotalDemand ~ MeanTemp + LockdownParameter + trend() + season()))
+
+fc6 <- forecast(fit6, test2) 
+
+fit6 %>% report()
+```
+
+```{r}
+fit6 %>% accuracy()
+```
+
+```{r}
+accuracy(fc6, test2)
+```
+
+```{r}
+fit6 %>% gg_tsresiduals()
+```
+
+```{r}
+fc6 %>% autoplot(df_monthly_dummy)
+```
+
+\section{Dynamic Regression}
+
+```{r Dynamic Reg}
+fit7 <- train2 %>% model(ARIMA(TotalDemand ~ MeanTemp))
+
+fc7 <- forecast(fit7, test2) 
+
+fit7 %>% report()
+```
+
+```{r Dynamic Reg Accuracy}
+accuracy(fc7, test2)
+```
+
+```{r Dynamic Reg Residuals}
+fit7 %>% gg_tsresiduals()
+```
+
+```{r Dynamic Reg Forecast}
+fc7 %>% autoplot(df_monthly_dummy) + 
+  xlab("Year") + ylab("Electricity Consumption") + 
+  ggtitle("Forecast for Electricity Consumption in Victoria using Dynamic Regression")
+```
+
+\section{Conclusion}
+
+This model performs the best in terms of accuracy out of all the models. However, they are mostly similar in terms of output.
+
+The main question was "Can we predict 2020 consumption based on other years?" 
+
+Answer: Yes, we can. While some countries saw significant dips in their electricity consumption. Victoria and Australia have not. 
+
+The possible factors for this could be many however, the one that comes to mind is the residential consumption has increased while industrial and business usage has reduced. 
+
+
